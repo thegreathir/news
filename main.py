@@ -1,0 +1,278 @@
+import os
+import json
+import re
+import time
+import logging
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional
+
+import requests
+from bs4 import BeautifulSoup
+from openai import OpenAI
+
+
+# ==============================
+# CONFIG
+# ==============================
+
+CHANNELS = [
+    "khabar_fouri",
+    "vahidonline",
+    "middle_east_spectator",
+]
+
+HOURS_BACK = 8
+TARGET_CHAT = 627176336
+
+SLEEP_BETWEEN_PAGES_SEC = 1.0
+MAX_PAGES_PER_CHANNEL = 250
+REQUEST_TIMEOUT_SEC = 30
+
+MODEL_NAME = "gpt-5.2"
+BASE_URL = "https://t.me/s"
+
+
+# ==============================
+# Logging
+# ==============================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ==============================
+# Scraper
+# ==============================
+
+def _parse_datetime(dt_str: str) -> datetime:
+    s = dt_str.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _isoformat_z(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _clean_text(node) -> str:
+    if not node:
+        return ""
+    for br in node.find_all("br"):
+        br.replace_with("\n")
+    return node.get_text(separator="", strip=True).strip()
+
+
+def _fetch(session: requests.Session, url: str) -> str:
+    r = session.get(url, timeout=REQUEST_TIMEOUT_SEC)
+    r.raise_for_status()
+    return r.text
+
+
+def _extract_messages(html: str) -> List[Dict]:
+    soup = BeautifulSoup(html, "html.parser")
+    wraps = soup.select("div.tgme_widget_message_wrap")
+
+    out = []
+    for w in wraps:
+        msg_div = w.select_one("div.tgme_widget_message")
+        if not msg_div or not msg_div.has_attr("data-post"):
+            continue
+
+        m = re.search(r"/(\d+)$", msg_div["data-post"])
+        if not m:
+            continue
+
+        msg_id = int(m.group(1))
+
+        time_tag = w.select_one("time")
+        if not time_tag or not time_tag.has_attr("datetime"):
+            continue
+
+        dt = _parse_datetime(time_tag["datetime"])
+        text_div = w.select_one("div.tgme_widget_message_text")
+        text = _clean_text(text_div)
+
+        out.append({"msg_id": msg_id, "dt": dt, "text": text})
+
+    return out
+
+
+def scrape_channel(channel: str, cutoff: datetime) -> List[Dict[str, str]]:
+    logger.info(f"Scraping channel: {channel}")
+
+    session = requests.Session()
+    session.headers.update({"User-Agent": "Mozilla/5.0"})
+
+    results = []
+    seen_ids = set()
+    next_before = None
+    pages = 0
+    stop = False
+
+    while not stop and pages < MAX_PAGES_PER_CHANNEL:
+        pages += 1
+        url = f"{BASE_URL}/{channel}" if not next_before else f"{BASE_URL}/{channel}?before={next_before}"
+
+        html = _fetch(session, url)
+        msgs = _extract_messages(html)
+        if not msgs:
+            break
+
+        oldest_dt_on_page = None
+        msgs_sorted = sorted(msgs, key=lambda x: x["msg_id"], reverse=True)
+
+        for m in msgs_sorted:
+            msg_id = m["msg_id"]
+            dt = m["dt"]
+            text = m["text"]
+
+            if oldest_dt_on_page is None or dt < oldest_dt_on_page:
+                oldest_dt_on_page = dt
+
+            if msg_id in seen_ids:
+                continue
+            seen_ids.add(msg_id)
+
+            if dt >= cutoff and text:
+                results.append({
+                    "msg": text,
+                    "datetime": _isoformat_z(dt),
+                    "source": channel,
+                })
+
+        if oldest_dt_on_page and oldest_dt_on_page < cutoff:
+            stop = True
+
+        next_before = min(m["msg_id"] for m in msgs)
+        time.sleep(SLEEP_BETWEEN_PAGES_SEC)
+
+    logger.info(f"{channel}: collected {len(results)} messages")
+    return results
+
+
+# ==============================
+# OpenAI Digest
+# ==============================
+
+def generate_digest(messages: List[Dict[str, str]]) -> str:
+    logger.info("Generating Persian digest using GPT-5.2")
+
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    messages_json = json.dumps(messages, ensure_ascii=False)
+
+    prompt = f"""
+تو یک تحلیلگر حرفه‌ای اخبار هستی.
+
+لیست زیر شامل پست‌های تلگرام اخیر است (JSON).
+وظیفه تو:
+- استخراج مهم‌ترین رویدادها
+- حذف موارد تکراری
+- گروه‌بندی اخبار مرتبط
+- تولید یک گزارش تحلیلی و خوانا به زبان فارسی
+- مدت زمان مطالعه حدود ۸ تا ۱۰ دقیقه
+- خروجی را بدون استفاده از Markdown تولید کن (هیچ قالب‌بندی Markdown مثل #، *، -، ``` و ... استفاده نکن).
+- برای ساختاربندی متن از ایموجی‌ها استفاده کن (مثلاً: 🧩 بخش‌ها، 🔥 تیترهای مهم، 🕒 زمان، 📌 نکات کلیدی، ✅ جمع‌بندی).
+- متن را ساده و روان و مناسب خواندن در تلگرام نگه دار.
+- ذکر نام کانال منبع هنگام ارجاع
+
+فقط متن نهایی گزارش را تولید کن (بدون توضیح اضافه).
+
+JSON:
+{messages_json}
+"""
+
+    response = client.responses.create(
+        model=MODEL_NAME,
+        input=prompt,
+    )
+
+    return response.output_text.strip()
+
+
+# ==============================
+# Telegram Bot Sender
+# ==============================
+
+def send_via_bot(text: str):
+    logger.info(f"Sending digest to {TARGET_CHAT}")
+
+    bot_token = os.environ["BOT_TOKEN"]
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+
+    chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
+
+    for idx, chunk in enumerate(chunks, start=1):
+        try:
+            resp = requests.post(
+                url,
+                json={
+                    "chat_id": TARGET_CHAT,
+                    "text": chunk,
+                    "disable_web_page_preview": True,
+                },
+                timeout=20,
+            )
+
+            if resp.status_code != 200:
+                logger.error("Telegram API returned non-200 response")
+                logger.error(f"Status Code: {resp.status_code}")
+                logger.error(f"Raw Response: {resp.text}")
+
+                try:
+                    error_json = resp.json()
+                    logger.error(f"Telegram error_code: {error_json.get('error_code')}")
+                    logger.error(f"Telegram description: {error_json.get('description')}")
+                except Exception:
+                    logger.error("Failed to parse Telegram error response as JSON")
+
+                resp.raise_for_status()
+
+        except requests.exceptions.RequestException as e:
+            logger.exception("Network or request exception occurred while sending message")
+            raise e
+
+    logger.info("Digest successfully sent")
+
+
+# ==============================
+# Main
+# ==============================
+
+def main():
+    logger.info(f"Starting aggregation for last {HOURS_BACK} hours")
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=HOURS_BACK)
+    all_messages = []
+
+    for ch in CHANNELS:
+        try:
+            all_messages.extend(scrape_channel(ch, cutoff))
+        except Exception:
+            logger.exception(f"Error scraping channel {ch}")
+
+    logger.info(f"Total messages collected: {len(all_messages)}")
+
+    if not all_messages:
+        logger.info("No recent messages found.")
+        return
+
+    all_messages.sort(key=lambda x: (x["datetime"], x["source"]))
+
+    digest = generate_digest(all_messages)
+
+    # DO NOT log digest content
+    send_via_bot(digest)
+
+    logger.info("Process completed successfully")
+
+
+if __name__ == "__main__":
+    main()
