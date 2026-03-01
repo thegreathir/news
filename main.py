@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 # Scraper
 # ==============================
 
+
 def _parse_datetime(dt_str: str) -> datetime:
     s = dt_str.strip()
     if s.endswith("Z"):
@@ -119,7 +120,11 @@ def scrape_channel(channel: str, cutoff: datetime) -> List[Dict[str, str]]:
 
     while not stop and pages < MAX_PAGES_PER_CHANNEL:
         pages += 1
-        url = f"{BASE_URL}/{channel}" if not next_before else f"{BASE_URL}/{channel}?before={next_before}"
+        url = (
+            f"{BASE_URL}/{channel}"
+            if not next_before
+            else f"{BASE_URL}/{channel}?before={next_before}"
+        )
 
         html = _fetch(session, url)
         msgs = _extract_messages(html)
@@ -142,11 +147,13 @@ def scrape_channel(channel: str, cutoff: datetime) -> List[Dict[str, str]]:
             seen_ids.add(msg_id)
 
             if dt >= cutoff and text:
-                results.append({
-                    "msg": text,
-                    "datetime": _isoformat_z(dt),
-                    "source": channel,
-                })
+                results.append(
+                    {
+                        "msg": text,
+                        "datetime": _isoformat_z(dt),
+                        "source": channel,
+                    }
+                )
 
         if oldest_dt_on_page and oldest_dt_on_page < cutoff:
             stop = True
@@ -161,6 +168,7 @@ def scrape_channel(channel: str, cutoff: datetime) -> List[Dict[str, str]]:
 # ==============================
 # OpenAI Digest
 # ==============================
+
 
 def generate_digest(messages: List[Dict[str, str]]) -> str:
     logger.info("Generating Persian digest using GPT-5.2")
@@ -177,7 +185,7 @@ def generate_digest(messages: List[Dict[str, str]]) -> str:
 - حذف موارد تکراری
 - گروه‌بندی اخبار مرتبط
 - تولید یک گزارش تحلیلی و خوانا به زبان فارسی
-- مدت زمان مطالعه حدود ۸ تا ۱۰ دقیقه
+- مدت زمان مطالعه حدود ۵ دقیقه
 - خروجی را بدون استفاده از Markdown تولید کن (هیچ قالب‌بندی Markdown مثل #، *، -، ``` و ... استفاده نکن).
 - برای ساختاربندی متن از ایموجی‌ها استفاده کن (مثلاً: 🧩 بخش‌ها، 🔥 تیترهای مهم، 🕒 زمان، 📌 نکات کلیدی، ✅ جمع‌بندی).
 - متن را ساده و روان و مناسب خواندن در تلگرام نگه دار.
@@ -201,13 +209,14 @@ JSON:
 # Telegram Bot Sender
 # ==============================
 
+
 def send_via_bot(text: str):
     logger.info(f"Sending digest to {TARGET_CHAT}")
 
     bot_token = os.environ["BOT_TOKEN"]
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
 
-    chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
+    chunks = [text[i : i + 4000] for i in range(0, len(text), 4000)]
 
     for idx, chunk in enumerate(chunks, start=1):
         try:
@@ -229,14 +238,18 @@ def send_via_bot(text: str):
                 try:
                     error_json = resp.json()
                     logger.error(f"Telegram error_code: {error_json.get('error_code')}")
-                    logger.error(f"Telegram description: {error_json.get('description')}")
+                    logger.error(
+                        f"Telegram description: {error_json.get('description')}"
+                    )
                 except Exception:
                     logger.error("Failed to parse Telegram error response as JSON")
 
                 resp.raise_for_status()
 
         except requests.exceptions.RequestException as e:
-            logger.exception("Network or request exception occurred while sending message")
+            logger.exception(
+                "Network or request exception occurred while sending message"
+            )
             raise e
 
     logger.info("Digest successfully sent")
@@ -245,6 +258,7 @@ def send_via_bot(text: str):
 # ==============================
 # Main
 # ==============================
+
 
 def main():
     logger.info(f"Starting aggregation for last {HOURS_BACK} hours")
