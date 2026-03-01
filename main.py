@@ -177,21 +177,32 @@ def generate_digest(messages: List[Dict[str, str]]) -> str:
     messages_json = json.dumps(messages, ensure_ascii=False)
 
     prompt = f"""
-تو یک تحلیلگر حرفه‌ای اخبار هستی.
+نقش: تحلیلگر ارشد خبر فارسی برای خلاصه‌سازی محتوای تلگرام.
 
-لیست زیر شامل پست‌های تلگرام اخیر است (JSON).
-وظیفه تو:
-- استخراج مهم‌ترین رویدادها
-- حذف موارد تکراری
-- گروه‌بندی اخبار مرتبط
-- تولید یک گزارش تحلیلی و خوانا به زبان فارسی
-- مدت زمان مطالعه حدود ۵ دقیقه
-- خروجی را بدون استفاده از Markdown تولید کن (هیچ قالب‌بندی Markdown مثل #، *، -، ``` و ... استفاده نکن).
-- برای ساختاربندی متن از ایموجی‌ها استفاده کن (مثلاً: 🧩 بخش‌ها، 🔥 تیترهای مهم، 🕒 زمان، 📌 نکات کلیدی، ✅ جمع‌بندی).
-- متن را ساده و روان و مناسب خواندن در تلگرام نگه دار.
-- ذکر نام کانال منبع هنگام ارجاع
+ورودی: آرایه JSON از پست‌ها با فیلدهای msg, datetime, source.
+قواعد:
+1) فقط بر اساس داده ورودی بنویس؛ هیچ خبر یا تحلیل بیرونی اضافه نکن.
+2) موارد تکراری را ادغام کن. اگر چند پست درباره یک رویدادند، یک مورد نهایی بساز و همه منابع مرتبط را ذکر کن.
+3) اخبار را بر اساس اهمیت مرتب کن: اثر سیاسی/امنیتی/اقتصادی > تازگی > تعداد منابع.
+4) اگر داده کافی نیست، با برچسب «نامطمئن» مشخص کن.
+5) خروجی کاملا فارسی و بدون Markdown باشد (بدون # * - ```).
+6) متن مناسب تلگرام، روان، فشرده، حدود 600 تا 900 کلمه.
+7) برای هر خبر منبع/منابع را ذکر کن.
 
-فقط متن نهایی گزارش را تولید کن (بدون توضیح اضافه).
+فرمت خروجی دقیق:
+🧩 جمع‌بندی کوتاه
+(۳ تا ۵ جمله از مهم‌ترین وضعیت کلی)
+
+🔥 مهم‌ترین رویدادها
+(۵ تا ۸ مورد؛ هر مورد شامل: عنوان کوتاه + شرح ۲-۳ جمله + منبع/منابع)
+
+📌 نکات کلیدی و الگوها
+(۳ تا 6 نکته تحلیلی از روندها و ارتباط خبرها)
+
+✅ جمع‌بندی نهایی
+(۲ تا ۴ جمله با تصویر کلی و ریسک‌های احتمالی نزدیک)
+
+فقط متن نهایی را برگردان.
 
 JSON:
 {messages_json}
@@ -210,13 +221,68 @@ JSON:
 # ==============================
 
 
+def _chunk_text_safely(text: str, limit: int = 3900) -> List[str]:
+    if len(text) <= limit:
+        return [text]
+
+    chunks = []
+    current = ""
+    parts = text.split("\n\n")
+
+    for part in parts:
+        candidate = part if not current else f"{current}\n\n{part}"
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+
+        if current:
+            chunks.append(current)
+            current = ""
+
+        if len(part) > limit:
+            lines = part.split("\n")
+            line_buf = ""
+
+            for line in lines:
+                candidate_line = line if not line_buf else f"{line_buf}\n{line}"
+                if len(candidate_line) <= limit:
+                    line_buf = candidate_line
+                    continue
+
+                if line_buf:
+                    chunks.append(line_buf)
+                line_buf = line
+
+                # Fallback if a single line is still too long.
+                while len(line_buf) > limit:
+                    split_at = line_buf.rfind(" ", 0, limit)
+                    if split_at == -1:
+                        split_at = limit
+                    chunks.append(line_buf[:split_at].rstrip())
+                    line_buf = line_buf[split_at:].lstrip()
+
+            if line_buf:
+                current = line_buf
+        else:
+            current = part
+
+    if current:
+        chunks.append(current)
+
+    if len(chunks) > 1:
+        total = len(chunks)
+        chunks = [f"({idx}/{total})\n{chunk}" for idx, chunk in enumerate(chunks, 1)]
+
+    return chunks
+
+
 def send_via_bot(text: str):
     logger.info(f"Sending digest to {TARGET_CHAT}")
 
     bot_token = os.environ["BOT_TOKEN"]
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
 
-    chunks = [text[i : i + 4000] for i in range(0, len(text), 4000)]
+    chunks = _chunk_text_safely(text, limit=3900)
 
     for idx, chunk in enumerate(chunks, start=1):
         try:
