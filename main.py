@@ -21,7 +21,7 @@ CHANNELS = [
     "middle_east_spectator",
 ]
 
-HOURS_BACK = 8
+HOURS_BACK = 6
 TARGET_CHAT = 627176336
 
 SLEEP_BETWEEN_PAGES_SEC = 1.0
