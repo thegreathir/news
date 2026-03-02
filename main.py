@@ -93,7 +93,11 @@ def _extract_messages(html: str) -> List[Dict]:
 
         msg_id = int(m.group(1))
 
-        time_tag = w.select_one("time")
+        # Some posts include media-duration <time> elements before the message date.
+        # Only parse the date element that carries a datetime attribute.
+        time_tag = w.select_one(
+            "a.tgme_widget_message_date time[datetime]"
+        ) or w.select_one("time[datetime]")
         if not time_tag or not time_tag.has_attr("datetime"):
             continue
 
