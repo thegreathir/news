@@ -1,13 +1,16 @@
+import argparse
 import os
 import json
 import re
 import time
 import logging
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 import requests
 from bs4 import BeautifulSoup
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 from openai import OpenAI
 
 
@@ -44,7 +47,8 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-MESSAGES_DUMP_PATH = "messages_dump.json"
+MESSAGES_DUMP_PATH = "messages_dump.html"
+MESSAGES_TEMPLATE_PATH = Path(__file__).with_name("messages_dump_template.html")
 
 
 # ==============================
@@ -64,6 +68,17 @@ def _parse_datetime(dt_str: str) -> datetime:
 
 def _isoformat_z(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _format_host_local_timestamp(dt_str: str) -> Dict[str, str]:
+    local_dt = _parse_datetime(dt_str).astimezone()
+    timezone_label = local_dt.tzname() or "Local"
+    return {
+        "datetime": local_dt.isoformat(timespec="seconds"),
+        "date_label": local_dt.strftime("%Y-%m-%d"),
+        "time_label": local_dt.strftime("%H:%M:%S"),
+        "timezone_label": timezone_label,
+    }
 
 
 def _clean_text(node) -> str:
@@ -337,9 +352,42 @@ def send_via_bot(text: str):
 
 def dump_messages(messages: List[Dict[str, str]], path: str = MESSAGES_DUMP_PATH) -> None:
     logger.info(f"Writing collected messages to {path}")
+
+    channels = sorted({message["source"] for message in messages})
+    channel_views = []
+
+    for index, channel in enumerate(channels):
+        grouped_messages = sorted(
+            [message for message in messages if message["source"] == channel],
+            key=lambda item: item["datetime"],
+        )
+        rendered_messages = [
+            {
+                **message,
+                **_format_host_local_timestamp(message["datetime"]),
+            }
+            for message in grouped_messages
+        ]
+        channel_views.append(
+            {
+                "name": channel,
+                "is_active": index == 0,
+                "tab_id": f"tab-{channel}",
+                "panel_id": f"panel-{channel}",
+                "messages": rendered_messages,
+                "message_count": len(rendered_messages),
+            }
+        )
+
+    template_env = Environment(
+        loader=FileSystemLoader(str(MESSAGES_TEMPLATE_PATH.parent)),
+        autoescape=select_autoescape(["html", "xml"]),
+    )
+    template = template_env.get_template(MESSAGES_TEMPLATE_PATH.name)
+    html_document = template.render(channels=channel_views)
+
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(messages, f, ensure_ascii=False, indent=2)
-        f.write("\n")
+        f.write(html_document)
 
 
 # ==============================
@@ -347,10 +395,10 @@ def dump_messages(messages: List[Dict[str, str]], path: str = MESSAGES_DUMP_PATH
 # ==============================
 
 
-def main():
-    logger.info(f"Starting aggregation for last {HOURS_BACK} hours")
+def collect_recent_messages(hours_back: int = HOURS_BACK) -> List[Dict[str, str]]:
+    logger.info(f"Starting aggregation for last {hours_back} hours")
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=HOURS_BACK)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_back)
     all_messages = []
 
     for ch in CHANNELS:
@@ -363,9 +411,35 @@ def main():
 
     if not all_messages:
         logger.info("No recent messages found.")
-        return
+        return []
 
     all_messages.sort(key=lambda x: (x["datetime"], x["source"]))
+    return all_messages
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Scrape Telegram channels, generate a digest, or dump messages to HTML."
+    )
+    parser.add_argument(
+        "--dump",
+        action="store_true",
+        help="Write scraped messages to a single HTML file instead of generating and sending the digest.",
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    all_messages = collect_recent_messages()
+
+    if not all_messages:
+        return
+
+    if args.dump:
+        dump_messages(all_messages)
+        logger.info("Process completed successfully")
+        return
 
     digest = generate_digest(all_messages)
 
