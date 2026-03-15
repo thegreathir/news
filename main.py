@@ -17,8 +17,9 @@ from openai import OpenAI
 
 CHANNELS = [
     "khabar_fouri",
+    "iranintltv",
     "vahidonline",
-    "middle_east_spectator",
+    "farsna",
 ]
 
 HOURS_BACK = 6
@@ -28,7 +29,7 @@ SLEEP_BETWEEN_PAGES_SEC = 1.0
 MAX_PAGES_PER_CHANNEL = 250
 REQUEST_TIMEOUT_SEC = 30
 
-MODEL_NAME = "gpt-5-mini"
+MODEL_NAME = "gpt-5.4"
 BASE_URL = "https://t.me/s"
 
 
@@ -42,6 +43,8 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+MESSAGES_DUMP_PATH = "messages_dump.json"
 
 
 # ==============================
@@ -68,7 +71,11 @@ def _clean_text(node) -> str:
         return ""
     for br in node.find_all("br"):
         br.replace_with("\n")
-    return node.get_text(separator="", strip=True).strip()
+    text = node.get_text(separator="", strip=False).strip()
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    return text
 
 
 def _fetch(session: requests.Session, url: str) -> str:
@@ -102,7 +109,10 @@ def _extract_messages(html: str) -> List[Dict]:
             continue
 
         dt = _parse_datetime(time_tag["datetime"])
-        text_div = w.select_one("div.tgme_widget_message_text")
+        # Telegram uses `tgme_widget_message_text` for both reply previews and
+        # the actual post body. Restrict to `.js-message_text` so reply posts
+        # don't get their quoted preview extracted as the message body.
+        text_div = w.select_one("div.tgme_widget_message_text.js-message_text")
         text = _clean_text(text_div)
 
         out.append({"msg_id": msg_id, "dt": dt, "text": text})
@@ -323,6 +333,13 @@ def send_via_bot(text: str):
             raise e
 
     logger.info("Digest successfully sent")
+
+
+def dump_messages(messages: List[Dict[str, str]], path: str = MESSAGES_DUMP_PATH) -> None:
+    logger.info(f"Writing collected messages to {path}")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(messages, f, ensure_ascii=False, indent=2)
+        f.write("\n")
 
 
 # ==============================
