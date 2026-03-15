@@ -350,7 +350,9 @@ def send_via_bot(text: str):
     logger.info("Digest successfully sent")
 
 
-def dump_messages(messages: List[Dict[str, str]], path: str = MESSAGES_DUMP_PATH) -> None:
+def dump_messages(
+    messages: List[Dict[str, str]], path: str = MESSAGES_DUMP_PATH
+) -> None:
     logger.info(f"Writing collected messages to {path}")
 
     channels = sorted({message["source"] for message in messages})
