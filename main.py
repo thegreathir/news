@@ -362,6 +362,7 @@ def dump_messages(
         grouped_messages = sorted(
             [message for message in messages if message["source"] == channel],
             key=lambda item: item["datetime"],
+            reverse=True,
         )
         rendered_messages = [
             {

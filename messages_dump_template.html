@@ -161,7 +161,7 @@
 <body>
   <main class="page">
     <h1>Messages Dump</h1>
-    <p class="subtitle">Messages grouped by channel and ordered chronologically inside each tab.</p>
+    <p class="subtitle">Messages grouped by channel and ordered from newest to oldest inside each tab.</p>
     <div class="tabs" role="tablist" aria-label="Channels">
       {% for channel in channels %}
       <button class="tab-button{% if channel.is_active %} active{% endif %}" id="{{ channel.tab_id }}" role="tab"
